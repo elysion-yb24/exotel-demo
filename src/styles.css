@@ -1,0 +1,405 @@
+@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+/*
+  Direction: a network operations instrument, not a consumer dialler. The agent
+  is monitoring two circuits, so the palette borrows from signal indicators —
+  amber for in-transition, green for carrying, red for dropped. Type is split:
+  condensed grotesque for state words that must read fast at a glance, mono for
+  anything an engineer might need to copy into a ticket.
+*/
+
+:root {
+  --ink: #0c1013;
+  --panel: #151b21;
+  --raise: #1b232b;
+  --line: #232c35;
+  --text: #dde5eb;
+  --dim: #78868f;
+  --amber: #e8a33d;
+  --green: #45c08a;
+  --red: #db5b5b;
+
+  --display: 'Barlow Condensed', 'Oswald', system-ui, sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--ink);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.shell {
+  min-height: 100vh;
+  display: grid;
+  place-content: start center;
+  padding: 48px 20px;
+  gap: 18px;
+}
+
+.card {
+  width: min(560px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 24px;
+}
+
+/* ---------- header ---------- */
+
+.head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 16px;
+}
+
+.eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.head__name {
+  font-family: var(--display);
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  margin: 2px 0 0;
+  line-height: 1;
+}
+
+.head__meta { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+
+.pill {
+  font-family: var(--display);
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 3px 9px;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  white-space: nowrap;
+}
+.pill--green { color: var(--green); }
+.pill--amber { color: var(--amber); }
+.pill--red   { color: var(--red); }
+.pill--dim   { color: var(--dim); }
+
+.detail { color: var(--dim); margin: 14px 0 22px; font-size: 12px; }
+
+/* ---------- signal path (signature) ---------- */
+
+.path {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr auto 1fr auto;
+  align-items: center;
+  padding: 26px 4px 30px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.node { display: grid; justify-items: center; gap: 8px; }
+
+.node__dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--line);
+  border: 1px solid #2e3944;
+  transition: background 200ms, box-shadow 200ms;
+}
+.node__dot[data-live='true'] {
+  background: var(--green);
+  border-color: var(--green);
+  box-shadow: 0 0 0 4px rgb(69 192 138 / 0.13);
+}
+
+.node--hub .node__dot { width: 11px; height: 11px; border-radius: 2px; }
+
+.node__label {
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.seg {
+  position: relative;
+  height: 1px;
+  margin: 0 10px;
+  align-self: start;
+  margin-top: 4px;
+}
+
+.seg__tag {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+.seg--down { background: var(--line); }
+.seg--up   { background: var(--green); box-shadow: 0 0 8px rgb(69 192 138 / 0.4); }
+
+/* Marching dashes: the circuit is being established but is not carrying yet. */
+.seg--ringing {
+  background: repeating-linear-gradient(
+    90deg,
+    var(--amber) 0 5px,
+    transparent 5px 11px
+  );
+  background-size: 11px 1px;
+  animation: march 520ms linear infinite;
+}
+
+@keyframes march {
+  to { background-position: 11px 0; }
+}
+
+.path__dir {
+  position: absolute;
+  top: 6px;
+  right: 0;
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .seg--ringing { animation: none; }
+}
+
+/* ---------- facts ---------- */
+
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 14px;
+  margin: 20px 0 0;
+}
+.facts dt {
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin-bottom: 4px;
+}
+.facts dd { margin: 0; font-size: 14px; }
+.facts__sid { font-size: 11px; color: var(--dim); word-break: break-all; }
+
+/* ---------- alert ---------- */
+
+.alert {
+  margin: 20px 0 0;
+  padding: 11px 13px;
+  border-left: 2px solid var(--red);
+  background: rgb(219 91 91 / 0.07);
+  color: #f0b9b9;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+/* ---------- dialer + controls ---------- */
+
+.dialer { display: flex; gap: 8px; margin-top: 22px; }
+
+.dialer__input {
+  flex: 1;
+  background: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 15px;
+  letter-spacing: 0.06em;
+  padding: 11px 13px;
+}
+.dialer__input:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
+.dialer__input:disabled { opacity: 0.4; }
+
+.controls { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+
+.btn {
+  font-family: var(--display);
+  font-size: 15px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 10px 18px;
+  background: var(--raise);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background 140ms, border-color 140ms;
+}
+.btn:hover:not(:disabled) { border-color: #384552; }
+.btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.btn:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
+.btn[data-on='true'] { border-color: var(--amber); color: var(--amber); }
+
+.btn--go   { background: rgb(69 192 138 / 0.13); border-color: var(--green); color: var(--green); }
+.btn--stop { background: rgb(219 91 91 / 0.11); border-color: var(--red); color: var(--red); }
+
+/* ---------- keypad ---------- */
+
+.keypad {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.key {
+  background: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 15px;
+  padding: 11px 0;
+  cursor: pointer;
+}
+.key:hover { border-color: #384552; }
+.key:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
+
+/* ---------- stop card ---------- */
+
+.card--stop { border-color: var(--red); }
+.stop__title {
+  font-family: var(--display);
+  font-size: 26px;
+  font-weight: 600;
+  margin: 0 0 10px;
+  color: var(--red);
+}
+.stop__body { margin: 0 0 14px; line-height: 1.6; }
+.stop__hint { margin: 0; color: var(--dim); font-size: 12px; }
+
+/* ---------- foot ---------- */
+
+.foot {
+  width: min(560px, 100%);
+  margin: 0;
+  color: var(--dim);
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+code {
+  background: var(--raise);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  padding: 1px 4px;
+  font-size: 0.92em;
+}
+
+/* ---------- incoming-call dialog ---------- */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  /* Dim rather than blur: the signal path behind stays readable, so the agent
+     can see which legs are up while deciding. */
+  background: rgb(6 9 11 / 0.78);
+  animation: modal-in 120ms ease-out;
+}
+
+.modal__box {
+  width: min(380px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--amber);
+  border-radius: 4px;
+  padding: 26px 24px 20px;
+  text-align: center;
+  box-shadow: 0 18px 50px rgb(0 0 0 / 0.5);
+}
+
+.modal__peer {
+  font-family: var(--display);
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin: 6px 0 0;
+  /* Numbers are the thing being identified — keep them dialable-looking. */
+  font-variant-numeric: tabular-nums;
+}
+
+.modal__note {
+  color: var(--dim);
+  font-size: 12px;
+  line-height: 1.55;
+  margin: 12px 0 20px;
+}
+
+.modal__actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.modal__actions .btn { width: 100%; }
+
+@keyframes modal-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* Ringing is the one state that should pull the eye across the room. */
+@media (prefers-reduced-motion: no-preference) {
+  .modal__box { animation: ring-pulse 1.6s ease-in-out infinite; }
+  @keyframes ring-pulse {
+    0%, 100% { border-color: var(--amber); }
+    50%      { border-color: rgb(232 163 61 / 0.35); }
+  }
+}
+
+/* ---------- ringer / notification preferences ---------- */
+
+.prefs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.prefs__btn {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  padding: 5px 10px;
+  background: transparent;
+  color: var(--dim);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.prefs__btn:hover { border-color: #384552; color: var(--text); }
+.prefs__btn:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
+.prefs__btn[data-on='true'] { color: var(--green); border-color: rgb(69 192 138 / 0.4); }
+
+.prefs__note { font-size: 11px; color: var(--dim); }
