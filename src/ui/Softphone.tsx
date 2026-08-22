@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Softphone as SoftphoneClient } from '../client/softphone';
-import { TabLeader } from '../client/tabLeader';
+import { TabLeader, type TabCommand } from '../client/tabLeader';
 import { Ringtone, type RingPattern } from '../client/ringtone';
 import { Notifier, type NotifyState } from '../client/notify';
 import type { LegState, PhoneSnapshot, ServerCallUpdate } from '../types';
@@ -28,10 +28,16 @@ const IDLE: PhoneSnapshot = {
 // ---------------------------------------------------------------------------
 
 function useSoftphone() {
-  const [snap, setSnap] = useState<PhoneSnapshot>(IDLE);
+  const [local, setLocal] = useState<PhoneSnapshot>(IDLE);
+  /** The leader's snapshot, relayed to this tab. Null in the leader itself. */
+  const [mirrored, setMirrored] = useState<PhoneSnapshot | null>(null);
+  const [isLeader, setIsLeader] = useState(false);
+  /** False when the browser has no Web Locks, so tabs cannot be coordinated. */
+  const [coordinated, setCoordinated] = useState(true);
   const [session, setSession] = useState<{ userId: string; displayName: string; callerId: string | null } | null>(null);
   const [fatal, setFatal] = useState<string | null>(null);
   const phone = useRef<SoftphoneClient | null>(null);
+  const bus = useRef<TabLeader | null>(null);
 
   useEffect(() => {
     let leader: TabLeader | null = null;
@@ -57,11 +63,36 @@ function useSoftphone() {
       const client = new SoftphoneClient({
         accessToken: data.accessToken,
         userId: data.userId,
-        onChange: setSnap,
+        onChange: (s) => {
+          setLocal(s);
+          // The leader is the only tab with real call state, so it publishes.
+          // Followers render this instead of their own permanently-idle state.
+          bus.current?.setBusy(isCallActive(s));
+          bus.current?.publish(s);
+        },
       });
       phone.current = client;
 
-      leader = new TabLeader((isLeader) => client.setLeader(isLeader));
+      leader = new TabLeader({
+        onLeaderChange: (nowLeader) => {
+          setIsLeader(nowLeader);
+          client.setLeader(nowLeader);
+          // A tab that just lost leadership must stop claiming to know the
+          // call state; a tab that just gained it stops mirroring.
+          if (nowLeader) setMirrored(null);
+        },
+        onSnapshot: setMirrored,
+        onCommand: (c) => runCommand(client, c),
+        onHello: () => {
+          // Someone started up, or woke up, and wants current state. Replay it
+          // rather than making them wait for the next change — which, if the
+          // call is simply in progress, may not come for minutes.
+          const s = phone.current?.snapshot();
+          if (s) bus.current?.publish(s);
+        },
+        onUnsupported: () => setCoordinated(false),
+      });
+      bus.current = leader;
 
       try {
         await client.connect();
@@ -85,11 +116,82 @@ function useSoftphone() {
       cancelled = true;
       events?.close();
       leader?.destroy();
+      bus.current = null;
       phone.current?.disconnect();
     };
   }, []);
 
-  return { snap, session, fatal, phone: phone.current };
+  /**
+   * Every control acts on the leader, wherever it is.
+   *
+   * In the leader this is a direct call; in a follower it goes over the bus and
+   * the leader performs it. The point is that the agent never has to find the
+   * "real" tab — the SIP registration stays put and the buttons follow them.
+   * Read through refs, because these are handed to effects and notification
+   * handlers that outlive the render they were created in.
+   */
+  const controls = useMemo(() => {
+    const to = (command: TabCommand, here: (p: SoftphoneClient) => void) => () => {
+      const client = phone.current;
+      if (!client) return;
+      if (bus.current?.isLeader ?? true) here(client);
+      else bus.current?.command(command);
+    };
+    return {
+      answer: to({ cmd: 'answer' }, (p) => p.answer()),
+      decline: to({ cmd: 'decline' }, (p) => p.decline()),
+      hangup: to({ cmd: 'hangup' }, (p) => p.hangup()),
+      toggleMute: to({ cmd: 'mute' }, (p) => p.toggleMute()),
+      toggleHold: to({ cmd: 'hold' }, (p) => p.toggleHold()),
+      reset: to({ cmd: 'reset' }, (p) => p.reset()),
+      sendDtmf: (digit: string) => to({ cmd: 'dtmf', digit }, (p) => p.sendDtmf(digit))(),
+      dial: (target: string) => to({ cmd: 'dial', to: target }, (p) => void p.dial(target).catch(() => {}))(),
+    };
+  }, []);
+
+  const claimLeadership = useCallback(() => bus.current?.claim(), []);
+
+  // A follower has no SIP session, so its own snapshot is idle and useless for
+  // display. Show the leader's instead, once it has told us anything.
+  const snap = isLeader ? local : mirrored ?? local;
+
+  return {
+    snap,
+    session,
+    fatal,
+    isLeader,
+    coordinated,
+    /** True when the tab holding the call is a different one. */
+    callElsewhere: !isLeader && isCallActive(snap),
+    claimLeadership,
+    controls,
+  };
+}
+
+/** Leader side: perform what a follower asked for. */
+function runCommand(client: SoftphoneClient, c: TabCommand): void {
+  switch (c.cmd) {
+    case 'answer': return client.answer();
+    case 'decline': return client.decline();
+    case 'hangup': return client.hangup();
+    case 'mute': return client.toggleMute();
+    case 'hold': return client.toggleHold();
+    case 'reset': return client.reset();
+    case 'dtmf': return client.sendDtmf(c.digit);
+    case 'dial': return void client.dial(c.to).catch(() => {});
+  }
+}
+
+/** Anything that must not be interrupted by moving the SIP registration. */
+function isCallActive(s: PhoneSnapshot): boolean {
+  return (
+    s.legs.agent === 'up' ||
+    s.state === 'placing' ||
+    s.state === 'ringing' ||
+    s.state === 'dialing_customer' ||
+    s.state === 'live' ||
+    s.state === 'ending'
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -143,6 +245,59 @@ const STATUS: Record<PhoneSnapshot['state'], { label: string; detail: string; to
   ending: { label: 'Ending', detail: 'Hanging up', tone: 'dim' },
   failed: { label: 'Failed', detail: 'See detail below', tone: 'red' },
 };
+
+// ---------------------------------------------------------------------------
+// Follower notice
+//
+// Only one tab can hold the SIP registration, and the others should say where
+// it lives rather than silently looking broken. What they should NOT do is act
+// disabled: the controls here work, because a follower relays them to the
+// leader. The audio comes out of the other tab, the buttons work in this one.
+//
+// Moving the registration is a different matter, and the two cases differ:
+//
+//   idle elsewhere    -> it can move here on request
+//   call in progress  -> it cannot. Tearing down the WebRTC session to move a
+//                        registration drops the call, and SIP has no handover.
+// ---------------------------------------------------------------------------
+
+function TabNotice({
+  callElsewhere,
+  peer,
+  onClaim,
+}: {
+  callElsewhere: boolean;
+  peer?: string;
+  onClaim: () => void;
+}) {
+  return (
+    <div className="notice" role="status">
+      <strong className="notice__title">
+        {callElsewhere ? 'Call running in another tab' : 'Calls are handled in another tab'}
+      </strong>
+      <p className="notice__body">
+        {callElsewhere && peer ? (
+          <>
+            The call with <strong>{peer}</strong> is connected in the tab that holds the
+            registration.{' '}
+          </>
+        ) : null}
+        The controls below act on that tab, so you can answer, dial and hang up from here — only
+        the audio lives over there.
+      </p>
+      {callElsewhere ? (
+        <p className="notice__body">
+          The registration can move here once the call ends. It can&rsquo;t move mid-call: that
+          would tear down the audio session.
+        </p>
+      ) : (
+        <button className="btn" onClick={onClaim}>
+          Move the registration here
+        </button>
+      )}
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Incoming-call dialog
@@ -211,14 +366,14 @@ function IncomingCall({
 // ---------------------------------------------------------------------------
 
 export function Softphone() {
-  const { snap, session, fatal, phone } = useSoftphone();
+  const { snap, session, fatal, isLeader, coordinated, callElsewhere, claimLeadership, controls } =
+    useSoftphone();
   const [number, setNumber] = useState('');
   const status = STATUS[snap.state];
 
   const dial = useCallback(() => {
-    if (!number.trim() || !phone) return;
-    phone.dial(number.trim()).catch(() => {});
-  }, [number, phone]);
+    if (number.trim()) controls.dial(number.trim());
+  }, [number, controls]);
 
   // -------------------------------------------------------------------------
   // Ring + notify
@@ -234,11 +389,6 @@ export function Softphone() {
     () => (localStorage.getItem('ring.pattern') as RingPattern | null) ?? 'marimba',
   );
 
-  // The notification action handler fires long after render, so read the phone
-  // through a ref rather than closing over a stale one.
-  const phoneRef = useRef(phone);
-  phoneRef.current = phone;
-
   useEffect(() => {
     // `pattern` here is the persisted initial value; the effect below keeps it
     // in sync afterwards without tearing down the audio graph.
@@ -247,9 +397,11 @@ export function Softphone() {
     notifier.current = n;
     setNotifyState(n.state);
 
+    // `controls` is stable and reads the phone through refs, so this handler
+    // stays correct however long after render the notification is clicked.
     n.register((action) => {
-      if (action === 'accept') phoneRef.current?.answer();
-      if (action === 'decline') phoneRef.current?.decline();
+      if (action === 'accept') controls.answer();
+      if (action === 'decline') controls.decline();
     });
 
     // Autoplay policy suspends an AudioContext built without a gesture, so the
@@ -301,7 +453,10 @@ export function Softphone() {
   }, [inFlight]);
 
   useEffect(() => {
-    if (ringing && !silent) {
+    // Only the leader rings. Followers show the call visually and, when
+    // hidden, raise a notification — but two tabs ringing at once is the
+    // exact confusion this coordination exists to prevent.
+    if (ringing && isLeader && !silent) {
       void ring.current?.start();
       notifier.current?.ringing(snap.call?.peer ?? 'Unknown');
     } else {
@@ -309,7 +464,7 @@ export function Softphone() {
       notifier.current?.stopRinging();
     }
     // Stop the noise if this tab loses leadership mid-ring.
-  }, [ringing, silent, snap.call?.peer]);
+  }, [ringing, isLeader, silent, snap.call?.peer]);
 
   useEffect(() => {
     ring.current?.setPattern(pattern);
@@ -357,11 +512,23 @@ export function Softphone() {
           </div>
           <div className="head__meta">
             <span className={`pill pill--${status.tone}`}>{status.label}</span>
-            {!snap.isLeader && <span className="pill pill--dim">Background tab</span>}
+            {!isLeader && <span className="pill pill--dim">Mirroring another tab</span>}
           </div>
         </header>
 
         <p className="detail">{status.detail}</p>
+
+        {!coordinated && (
+          <p className="alert">
+            This browser has no Web Locks API, so tabs can&rsquo;t agree on which one owns the
+            phone. Every open tab will register and ring. Keep one tab open, or use a current
+            Chrome, Edge, Firefox or Safari.
+          </p>
+        )}
+
+        {!isLeader && (
+          <TabNotice callElsewhere={callElsewhere} peer={snap.call?.peer} onClaim={claimLeadership} />
+        )}
 
         <SignalPath legs={snap.legs} direction={snap.call?.direction} />
 
@@ -393,9 +560,9 @@ export function Softphone() {
               onKeyDown={(e) => e.key === 'Enter' && dial()}
               placeholder="Number to call"
               inputMode="tel"
-              disabled={!snap.registered || !snap.isLeader}
+              disabled={!snap.registered}
             />
-            <button className="btn btn--go" onClick={dial} disabled={!snap.registered || !snap.isLeader || !number.trim()}>
+            <button className="btn btn--go" onClick={dial} disabled={!snap.registered || !number.trim()}>
               Call
             </button>
           </div>
@@ -405,22 +572,22 @@ export function Softphone() {
           {/* While ringing, the dialog owns both choices — a second Hang up
               button here would be a third way to do the same thing. */}
           {busy && snap.state !== 'ringing' && (
-            <button className="btn btn--stop" onClick={() => phone?.hangup()}>
+            <button className="btn btn--stop" onClick={controls.hangup}>
               Hang up
             </button>
           )}
           {(snap.state === 'live' || snap.state === 'dialing_customer') && (
             <>
-              <button className="btn" data-on={snap.muted} onClick={() => phone?.toggleMute()}>
+              <button className="btn" data-on={snap.muted} onClick={controls.toggleMute}>
                 {snap.muted ? 'Unmute' : 'Mute'}
               </button>
-              <button className="btn" data-on={snap.held} onClick={() => phone?.toggleHold()}>
+              <button className="btn" data-on={snap.held} onClick={controls.toggleHold}>
                 {snap.held ? 'Resume' : 'Hold'}
               </button>
             </>
           )}
           {snap.state === 'failed' && (
-            <button className="btn" onClick={() => phone?.reset()}>
+            <button className="btn" onClick={controls.reset}>
               Clear
             </button>
           )}
@@ -429,7 +596,7 @@ export function Softphone() {
         {snap.state === 'live' && (
           <div className="keypad">
             {['1','2','3','4','5','6','7','8','9','*','0','#'].map((d) => (
-              <button key={d} className="key" onClick={() => phone?.sendDtmf(d)}>
+              <button key={d} className="key" onClick={() => controls.sendDtmf(d)}>
                 {d}
               </button>
             ))}
@@ -471,12 +638,16 @@ export function Softphone() {
         </div>
       </div>
 
+      {/* Shown in every tab, not just the leader: the agent should be able to
+          pick up from whatever they are looking at. Only one tab RINGS, but all
+          of them can answer, and the accept is relayed to the one that holds
+          the session. */}
       {snap.state === 'ringing' && (
         <IncomingCall
           peer={snap.call?.peer ?? 'Unknown'}
           direction={snap.call?.direction}
-          onAccept={() => phone?.answer()}
-          onDecline={() => phone?.decline()}
+          onAccept={controls.answer}
+          onDecline={controls.decline}
         />
       )}
 

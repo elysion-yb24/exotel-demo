@@ -107,7 +107,7 @@ relayed over SSE. That's why `applyServerUpdate()` exists, and why the UI shows
 | `scripts/smoke-test.ts` | Walks token → app → SIP provisioning → WSS reachability → real dial. Stops at the first failure with a fix. **Run this first.** |
 | `src/types.ts` | The leg model and state machine types. |
 | `src/client/softphone.ts` | The core. State machine, outbound correlation, timeout handling, error translation. |
-| `src/client/tabLeader.ts` | BroadcastChannel leader election. Exotel's docs make this your job: every open tab registers and rings otherwise. |
+| `src/client/tabLeader.ts` | Web Locks leader election plus a BroadcastChannel bus. Exotel's docs make this your job: every open tab registers and rings otherwise. The lock holder owns the registration; the other tabs mirror its state and relay commands to it. |
 | `src/server/server.ts` | Token minting, status-callback webhook, SSE fan-out, optional server-side dial for auditable/compliance-gated calling. |
 | `src/ui/Softphone.tsx` | Agent UI. The signal path is the centrepiece: browser ─ Exotel ─ customer, per-leg state. |
 

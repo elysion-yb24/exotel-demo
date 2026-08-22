@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "smoke": "tsx scripts/smoke-test.ts",
+    "test:tabs": "node --import ./node_modules/tsx/dist/loader.mjs --import ./scripts/sdk-hook.mjs scripts/tabs-election-test.mts && node --import ./node_modules/tsx/dist/loader.mjs --import ./scripts/sdk-hook.mjs scripts/tabs-registration-test.mts",
     "server": "tsx watch src/server/server.ts",
     "dev": "vite",
     "typecheck": "tsc --noEmit"

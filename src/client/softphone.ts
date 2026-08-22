@@ -62,6 +62,21 @@ export interface SoftphoneOptions {
 
 const IDLE_LEGS: CallLegs = { agent: 'down', customer: 'down' };
 
+/** Minimum gap between REGISTER attempts. Covers the SDK's own 500ms + a RTT. */
+const REGISTER_RETRY_MS = 4_000;
+
+/** How often to reconcile intent against observation while in the foreground. */
+const WATCHDOG_MS = 5_000;
+
+/**
+ * How long a tab must have been hidden before we stop trusting its
+ * registration. Chrome begins intensive timer throttling at five minutes and
+ * can freeze a page well before that; thirty seconds is comfortably inside the
+ * window where a transport may have died unobserved, and long enough that an
+ * ordinary tab switch does not trigger a re-register.
+ */
+const STALE_AFTER_MS = 30_000;
+
 export class Softphone {
   private phone: any = null;
   private opts: Required<Omit<SoftphoneOptions, 'onChange'>> & Pick<SoftphoneOptions, 'onChange'>;
@@ -73,7 +88,12 @@ export class Softphone {
   private muted = false;
   private held = false;
   private error: string | null = null;
-  private isLeader = true;
+  /**
+   * Starts false: never register until something explicitly says this tab
+   * leads. Defaulting to true means a tab whose leadership verdict never
+   * arrives registers anyway, and every open tab ends up ringing.
+   */
+  private isLeader = false;
 
   /**
    * Set between MakeCall and the arrival of the agent leg. Its presence is what
@@ -119,11 +139,16 @@ export class Softphone {
     }
 
     this.phone = phone;
-    if (this.isLeader) phone.RegisterDevice();
+    this.installLifecycle();
+    // Leadership may have been decided before the SDK finished initialising, so
+    // reconcile rather than assuming this is the first word on the subject.
+    this.sync();
   }
 
   disconnect(): void {
     this.clearPending();
+    this.removeLifecycle();
+    this.registrationWanted = false;
     this.phone?.UnRegisterDevice();
     this.set({ state: 'offline', registered: false, legs: { ...IDLE_LEGS }, call: null });
   }
@@ -256,14 +281,153 @@ export class Softphone {
     });
   }
 
+  // -------------------------------------------------------------------------
+  // Registration
+  //
+  // Two facts, deliberately kept apart:
+  //
+  //   registrationWanted  intent. Set by leadership, nothing else.
+  //   registered          observation. Only ever set by an SDK event.
+  //
+  // Collapsing them is how integrations break. `registered` does not become
+  // true until the SIP `registered` event arrives, and the core SDK waits 500ms
+  // after loading credentials before it even starts, plus a round trip. Gating
+  // the unregister on `registered` therefore misses the common case — a tab
+  // demoted while its registration is in flight, whose registration lands
+  // afterwards and is never torn down, so every tab ends up ringing.
+  //
+  // Keeping them apart is also what makes recovery possible: `sync()` compares
+  // the two and closes whatever gap it finds, so any wake-up path can simply
+  // call it rather than having to reason about which half is stale.
+  // -------------------------------------------------------------------------
+
+  private registrationWanted = false;
+  /** When the last REGISTER was issued, to avoid hammering on repeated wakes. */
+  private lastRegisterAt = 0;
+
   /** Call this when tab leadership changes. Only the leader registers. */
   setLeader(isLeader: boolean): void {
     this.isLeader = isLeader;
-    if (!this.phone) return;
-    if (isLeader && !this.registered) this.phone.RegisterDevice();
-    if (!isLeader && this.registered) this.phone.UnRegisterDevice();
+    this.registrationWanted = isLeader;
+    this.sync();
     this.emit();
   }
+
+  /**
+   * Close any gap between what we want and what we have.
+   *
+   * Idempotent and cheap, so it is safe to call from a watchdog, a visibility
+   * change, or a leadership change without tracking which one got there first.
+   * This replaces the old `if (isLeader && !registrationWanted)` guard, which
+   * could not re-register after a wake: intent was already true, so the guard
+   * short-circuited and the tab sat there believing it was registered while its
+   * transport was dead.
+   */
+  sync(): void {
+    if (!this.phone) return;
+
+    if (this.registrationWanted && !this.registered) {
+      // The SDK gives us no way to ask whether a REGISTER is in flight, so the
+      // cooldown stands in for one. Long enough to cover the SDK's own 500ms
+      // plus a round trip, short enough that a lost registration comes back
+      // well inside a caller's patience.
+      if (Date.now() - this.lastRegisterAt < REGISTER_RETRY_MS) return;
+      this.lastRegisterAt = Date.now();
+      this.phone.RegisterDevice();
+      return;
+    }
+
+    if (!this.registrationWanted && this.registered) {
+      this.phone.UnRegisterDevice();
+    }
+  }
+
+  /**
+   * Re-establish the registration after this tab was asleep.
+   *
+   * The problem this solves: `registered` is a cached boolean that only changes
+   * when the SDK fires an event, and a WebSocket that dies while the tab is
+   * frozen fires nothing. So a tab that has been backgrounded for a while comes
+   * back showing "Ready" with the dial field enabled, while in reality nothing
+   * can reach the agent. Believing the flag is the bug; the only way to know
+   * the transport is alive is to use it.
+   *
+   * A REGISTER is a tiny transaction, so re-issuing one on wake is cheap
+   * insurance. A live call is left strictly alone — re-registering underneath
+   * one tears down the WebRTC session.
+   */
+  revalidate(): void {
+    if (!this.phone || !this.registrationWanted) return;
+    if (this.callActive()) return;
+    // Distrust the cached flag rather than the transport: dropping it to false
+    // is what lets sync() decide a REGISTER is owed.
+    this.registered = false;
+    this.lastRegisterAt = 0;
+    this.set({ state: this.state === 'failed' ? 'failed' : 'connecting' });
+    this.sync();
+  }
+
+  /** Anything that must not be interrupted by touching the registration. */
+  callActive(): boolean {
+    return (
+      this.legs.agent === 'up' ||
+      this.state === 'placing' ||
+      this.state === 'ringing' ||
+      this.state === 'dialing_customer' ||
+      this.state === 'live' ||
+      this.state === 'ending'
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Page lifecycle
+  //
+  // Every one of these is a path on which a registration can silently die
+  // without the SDK saying a word.
+  // -------------------------------------------------------------------------
+
+  private watchdog: ReturnType<typeof setInterval> | null = null;
+  private hiddenSince = 0;
+
+  private installLifecycle(): void {
+    document.addEventListener('visibilitychange', this.onVisibilityChange);
+    window.addEventListener('pageshow', this.onPageShow);
+    window.addEventListener('online', this.onOnline);
+    // The watchdog is throttled to a crawl in a hidden tab, which is fine: it
+    // exists for the foreground case, and the wake handlers cover the rest.
+    this.watchdog = setInterval(() => this.sync(), WATCHDOG_MS);
+  }
+
+  private removeLifecycle(): void {
+    document.removeEventListener('visibilitychange', this.onVisibilityChange);
+    window.removeEventListener('pageshow', this.onPageShow);
+    window.removeEventListener('online', this.onOnline);
+    if (this.watchdog) clearInterval(this.watchdog);
+    this.watchdog = null;
+  }
+
+  private onVisibilityChange = () => {
+    if (document.hidden) {
+      this.hiddenSince = Date.now();
+      return;
+    }
+    const napped = this.hiddenSince ? Date.now() - this.hiddenSince : 0;
+    this.hiddenSince = 0;
+    // A brief tab switch cannot have killed anything, and re-registering on
+    // every alt-tab would flicker the status pill for no reason. A long nap is
+    // the case where throttling and freezing apply.
+    if (napped > STALE_AFTER_MS) this.revalidate();
+    else this.sync();
+  };
+
+  private onPageShow = (e: PageTransitionEvent) => {
+    // Restored from bfcache. The document is intact — and so is our Web Lock,
+    // so we are still the leader — but the SIP transport almost certainly is
+    // not, and the SDK has no idea.
+    if (e.persisted) this.revalidate();
+  };
+
+  private onOnline = () => this.revalidate();
 
   // -------------------------------------------------------------------------
   // SDK event handlers
@@ -273,6 +437,13 @@ export class Softphone {
     // States seen from the SDK: registered / unregistered / terminated / sent request
     const normalized = String(event).toLowerCase();
     if (normalized === 'registered') {
+      // Late arrival: we were demoted while this registration was in flight.
+      // Tear it down now, or this tab keeps ringing alongside the leader.
+      if (!this.registrationWanted) {
+        this.phone?.UnRegisterDevice();
+        this.set({ registered: false, state: 'offline' });
+        return;
+      }
       this.set({ registered: true, state: this.call ? this.state : 'ready', error: null });
     } else if (normalized === 'terminated') {
       this.set({
@@ -282,6 +453,10 @@ export class Softphone {
       });
     } else if (normalized === 'unregistered') {
       this.set({ registered: false, state: 'offline' });
+      // If we still want a registration, this was not our doing — the transport
+      // dropped. The watchdog would get there eventually; going now means the
+      // gap is a round trip rather than up to WATCHDOG_MS.
+      if (this.registrationWanted) this.sync();
     }
   };
 

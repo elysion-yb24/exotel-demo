@@ -403,3 +403,33 @@ code {
 .prefs__btn[data-on='true'] { color: var(--green); border-color: rgb(69 192 138 / 0.4); }
 
 .prefs__note { font-size: 11px; color: var(--dim); }
+
+/* ---------- follower notice ---------- */
+
+.notice {
+  margin: 0 0 20px;
+  padding: 14px 16px;
+  background: var(--raise);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--dim);
+  border-radius: 3px;
+}
+
+.notice__title {
+  display: block;
+  font-family: var(--display);
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text);
+}
+
+.notice__body {
+  color: var(--dim);
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 8px 0 0;
+}
+.notice__body strong { color: var(--text); font-weight: 500; }
+
+.notice .btn { margin-top: 12px; font-size: 13px; padding: 7px 14px; }
