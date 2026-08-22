@@ -28,16 +28,10 @@ const IDLE: PhoneSnapshot = {
 // ---------------------------------------------------------------------------
 
 function useSoftphone() {
-  const [local, setLocal] = useState<PhoneSnapshot>(IDLE);
-  /** The leader's snapshot, relayed to this tab. Null in the leader itself. */
-  const [mirrored, setMirrored] = useState<PhoneSnapshot | null>(null);
-  const [isLeader, setIsLeader] = useState(false);
-  /** Heartbeat-derived: another tab is on a call. Independent of snapshots. */
-  const [peerBusy, setPeerBusy] = useState(false);
+  const [snap, setSnap] = useState<PhoneSnapshot>(IDLE);
   const [session, setSession] = useState<{ userId: string; displayName: string; callerId: string | null } | null>(null);
   const [fatal, setFatal] = useState<string | null>(null);
   const phone = useRef<SoftphoneClient | null>(null);
-  const bus = useRef<TabLeader | null>(null);
 
   useEffect(() => {
     let leader: TabLeader | null = null;
@@ -63,38 +57,11 @@ function useSoftphone() {
       const client = new SoftphoneClient({
         accessToken: data.accessToken,
         userId: data.userId,
-        onChange: (s) => {
-          setLocal(s);
-          // The leader is the only tab with real call state, so it publishes.
-          // Followers need it to know whether a call is in progress elsewhere.
-          if (bus.current?.isLeader) {
-            bus.current.setBusy(isCallActive(s));
-            bus.current.broadcast({ type: 'snapshot', snap: s });
-          }
-        },
+        onChange: setSnap,
       });
       phone.current = client;
 
-      leader = new TabLeader({
-        onLeaderChange: (nowLeader) => {
-          setIsLeader(nowLeader);
-          client.setLeader(nowLeader);
-          // A tab that just lost leadership must stop claiming to know the
-          // call state; a tab that just gained it stops mirroring.
-          if (nowLeader) setMirrored(null);
-        },
-        onMessage: (msg) => {
-          if (msg?.type === 'snapshot') setMirrored(msg.snap as PhoneSnapshot);
-        },
-        onPeerBusyChange: setPeerBusy,
-        onHello: () => {
-          // A tab just joined. Replay our state so it can describe the call in
-          // progress instead of waiting for the next change.
-          const s = phone.current?.snapshot();
-          if (s) leader?.broadcast({ type: 'snapshot', snap: s });
-        },
-      });
-      bus.current = leader;
+      leader = new TabLeader((isLeader) => client.setLeader(isLeader));
 
       try {
         await client.connect();
@@ -118,39 +85,11 @@ function useSoftphone() {
       cancelled = true;
       events?.close();
       leader?.destroy();
-      bus.current = null;
       phone.current?.disconnect();
     };
   }, []);
 
-  // A follower has no SIP session, so its own snapshot is idle and useless for
-  // display. Show the leader's instead, once it has told us anything.
-  const snap = isLeader ? local : mirrored ?? local;
-
-  return {
-    snap,
-    session,
-    fatal,
-    isLeader,
-    /** True when the tab holding the call is a different one. */
-    // peerBusy is the reliable signal; the mirrored snapshot only adds detail
-    // (who is on the call) and may not have arrived yet.
-    callElsewhere: !isLeader && (peerBusy || (!!mirrored && isCallActive(mirrored))),
-    claimLeadership: () => bus.current?.claim(),
-    phone: phone.current,
-  };
-}
-
-/** Anything that must not be interrupted by moving the SIP registration. */
-function isCallActive(s: PhoneSnapshot): boolean {
-  return (
-    s.legs.agent === 'up' ||
-    s.state === 'placing' ||
-    s.state === 'ringing' ||
-    s.state === 'dialing_customer' ||
-    s.state === 'live' ||
-    s.state === 'ending'
-  );
+  return { snap, session, fatal, phone: phone.current };
 }
 
 // ---------------------------------------------------------------------------
@@ -204,52 +143,6 @@ const STATUS: Record<PhoneSnapshot['state'], { label: string; detail: string; to
   ending: { label: 'Ending', detail: 'Hanging up', tone: 'dim' },
   failed: { label: 'Failed', detail: 'See detail below', tone: 'red' },
 };
-
-// ---------------------------------------------------------------------------
-// Follower notice
-//
-// Only one tab can hold the SIP registration, so the others need to say so
-// rather than silently looking broken. Two cases, and the difference matters:
-//
-//   idle elsewhere    -> leadership can move here on request
-//   call in progress  -> it cannot. Moving the registration mid-call means
-//                        tearing down the WebRTC session, which drops the call.
-//                        There is no handover mechanism in SIP for this.
-// ---------------------------------------------------------------------------
-
-function TabNotice({
-  callElsewhere,
-  peer,
-  onClaim,
-}: {
-  callElsewhere: boolean;
-  peer?: string;
-  onClaim: () => void;
-}) {
-  return (
-    <div className="notice" role="status">
-      {callElsewhere ? (
-        <>
-          <strong className="notice__title">Call in progress in another tab</strong>
-          <p className="notice__body">
-            {peer ? <>The call with <strong>{peer}</strong> is</> : 'The call is'} being handled in the tab
-            that started it. An active call can&rsquo;t be moved here — switching tabs would end it.
-          </p>
-        </>
-      ) : (
-        <>
-          <strong className="notice__title">Calls are handled in another tab</strong>
-          <p className="notice__body">
-            This tab is watching only. Focus it, or use the button, to make it the one that rings.
-          </p>
-          <button className="btn" onClick={onClaim}>
-            Handle calls here
-          </button>
-        </>
-      )}
-    </div>
-  );
-}
 
 // ---------------------------------------------------------------------------
 // Incoming-call dialog
@@ -318,7 +211,7 @@ function IncomingCall({
 // ---------------------------------------------------------------------------
 
 export function Softphone() {
-  const { snap, session, fatal, isLeader, callElsewhere, claimLeadership, phone } = useSoftphone();
+  const { snap, session, fatal, phone } = useSoftphone();
   const [number, setNumber] = useState('');
   const status = STATUS[snap.state];
 
@@ -408,10 +301,7 @@ export function Softphone() {
   }, [inFlight]);
 
   useEffect(() => {
-    // Only the leader rings. Followers show the call visually and, when
-    // hidden, raise a notification — but two tabs ringing at once is the
-    // exact confusion this coordination exists to prevent.
-    if (ringing && isLeader && !silent) {
+    if (ringing && !silent) {
       void ring.current?.start();
       notifier.current?.ringing(snap.call?.peer ?? 'Unknown');
     } else {
@@ -419,7 +309,7 @@ export function Softphone() {
       notifier.current?.stopRinging();
     }
     // Stop the noise if this tab loses leadership mid-ring.
-  }, [ringing, isLeader, silent, snap.call?.peer]);
+  }, [ringing, silent, snap.call?.peer]);
 
   useEffect(() => {
     ring.current?.setPattern(pattern);
@@ -467,15 +357,11 @@ export function Softphone() {
           </div>
           <div className="head__meta">
             <span className={`pill pill--${status.tone}`}>{status.label}</span>
-            {!isLeader && <span className="pill pill--dim">Not handling calls</span>}
+            {!snap.isLeader && <span className="pill pill--dim">Background tab</span>}
           </div>
         </header>
 
         <p className="detail">{status.detail}</p>
-
-        {!isLeader && (
-          <TabNotice callElsewhere={callElsewhere} peer={snap.call?.peer} onClaim={claimLeadership} />
-        )}
 
         <SignalPath legs={snap.legs} direction={snap.call?.direction} />
 
@@ -507,9 +393,9 @@ export function Softphone() {
               onKeyDown={(e) => e.key === 'Enter' && dial()}
               placeholder="Number to call"
               inputMode="tel"
-              disabled={!snap.registered || !isLeader}
+              disabled={!snap.registered || !snap.isLeader}
             />
-            <button className="btn btn--go" onClick={dial} disabled={!snap.registered || !isLeader || !number.trim()}>
+            <button className="btn btn--go" onClick={dial} disabled={!snap.registered || !snap.isLeader || !number.trim()}>
               Call
             </button>
           </div>
@@ -585,7 +471,7 @@ export function Softphone() {
         </div>
       </div>
 
-      {snap.state === 'ringing' && isLeader && (
+      {snap.state === 'ringing' && (
         <IncomingCall
           peer={snap.call?.peer ?? 'Unknown'}
           direction={snap.call?.direction}

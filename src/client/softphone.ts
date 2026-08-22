@@ -73,12 +73,7 @@ export class Softphone {
   private muted = false;
   private held = false;
   private error: string | null = null;
-  /**
-   * Starts false: never register until something explicitly says this tab
-   * leads. Defaulting to true means a tab whose leadership verdict never
-   * arrives registers anyway, and every open tab ends up ringing.
-   */
-  private isLeader = false;
+  private isLeader = true;
 
   /**
    * Set between MakeCall and the arrival of the agent leg. Its presence is what
@@ -124,15 +119,11 @@ export class Softphone {
     }
 
     this.phone = phone;
-    if (this.isLeader) {
-      this.registrationWanted = true;
-      phone.RegisterDevice();
-    }
+    if (this.isLeader) phone.RegisterDevice();
   }
 
   disconnect(): void {
     this.clearPending();
-    this.registrationWanted = false;
     this.phone?.UnRegisterDevice();
     this.set({ state: 'offline', registered: false, legs: { ...IDLE_LEGS }, call: null });
   }
@@ -265,33 +256,12 @@ export class Softphone {
     });
   }
 
-  /**
-   * Whether we WANT a registration, as opposed to whether we have one.
-   *
-   * These must be tracked separately. `registered` only becomes true when the
-   * SIP `registered` event arrives, and the core SDK does not begin registering
-   * until 500ms after it loads credentials, plus a round trip. Gating the
-   * unregister on `registered` therefore misses the common case: a tab is
-   * demoted while its registration is still in flight, the guard fails, and the
-   * registration lands afterwards and is never torn down. Every tab ends up
-   * registered and every tab rings.
-   */
-  private registrationWanted = false;
-
   /** Call this when tab leadership changes. Only the leader registers. */
   setLeader(isLeader: boolean): void {
     this.isLeader = isLeader;
-    if (!this.phone) {
-      this.emit();
-      return;
-    }
-    if (isLeader && !this.registrationWanted) {
-      this.registrationWanted = true;
-      this.phone.RegisterDevice();
-    } else if (!isLeader && this.registrationWanted) {
-      this.registrationWanted = false;
-      this.phone.UnRegisterDevice();
-    }
+    if (!this.phone) return;
+    if (isLeader && !this.registered) this.phone.RegisterDevice();
+    if (!isLeader && this.registered) this.phone.UnRegisterDevice();
     this.emit();
   }
 
@@ -303,13 +273,6 @@ export class Softphone {
     // States seen from the SDK: registered / unregistered / terminated / sent request
     const normalized = String(event).toLowerCase();
     if (normalized === 'registered') {
-      // Late arrival: we were demoted while this registration was in flight.
-      // Tear it down now, or this tab keeps ringing alongside the leader.
-      if (!this.registrationWanted) {
-        this.phone?.UnRegisterDevice();
-        this.set({ registered: false, state: 'offline' });
-        return;
-      }
       this.set({ registered: true, state: this.call ? this.state : 'ready', error: null });
     } else if (normalized === 'terminated') {
       this.set({
